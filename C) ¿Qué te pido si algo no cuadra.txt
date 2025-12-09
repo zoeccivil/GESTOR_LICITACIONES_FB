@@ -1,0 +1,534 @@
+C) ¿Qué te pido si algo no cuadra?
+
+Si después de pegar esto aún ves la fila en rojo, pásame (copiar/pegar) estas funciones para revisarles el cuerpo y devolvértelas corregidas completas:
+
+El método que puebla el listado (donde se hace tree.insert).
+Suele llamarse _cargar_licitaciones_en_treeview, _refrescar_listado o similar.
+
+get_all_data()/carga de licitaciones en DatabaseManager (el bloque donde se inyecta ganador_nombre y ganado_por_nosotros en cada Lote).
+
+ReportGenerator si cambiaron sus nombres de métodos (pero con los dos de arriba debería bastar).
+
+Con estos cambios ya deberías ver:
+
+Verde en el listado para la licitación de Comedores (está “Adjudicada” y ganaste el Lote 4).
+
+Reportes con el ganador por lote resaltado en verde, y si es nuestra empresa, mostrando la columna “Empresa Nuestra” con el nombre.
+
+
+
+
+TODAVIA NO SE MARCA COMO GANADA Y EN LOS REPORTES, APARTE DEL PDF Y EL EXCEL TAMBIEN QUIERO QUE MARQUE VERDE A LOS GANADORES EN EL TREEVIEW ANTES DE IMPRIMIR EL REPORTE EN RESULTADOS DETALLADOS, TE DEJO LOS CODIGOS QUE ME PEDISTE A VER SI ENCUENTRAS POR QUE ESTAN OCURRIENDO LOS ERRORES:
+
+    def actualizar_tabla_gui(self, lista_a_mostrar=None):
+        lista_para_usar = lista_a_mostrar if lista_a_mostrar is not None else self.gestor_licitaciones
+        self.tree.delete(*self.tree.get_children())
+
+        estados_finalizados = ["Adjudicada", "Descalificado Fase A", "Descalificado Fase B", "Desierta", "Cancelada"]
+
+        licitaciones_activas = [l for l in lista_para_usar if l.estado not in estados_finalizados]
+        licitaciones_finalizadas = [l for l in lista_para_usar if l.estado in estados_finalizados]
+
+        def obtener_clave_ordenamiento(licitacion):
+            hoy = datetime.date.today()
+            fechas = []
+            for d in licitacion.cronograma.values():
+                if d.get("estado") == "Pendiente" and d.get("fecha_limite"):
+                    try:
+                        f = datetime.datetime.strptime(d["fecha_limite"], "%Y-%m-%d").date()
+                        if f >= hoy:
+                            fechas.append(f)
+                    except Exception:
+                        pass
+            return min(fechas) if fechas else datetime.date.max
+
+        activas_ordenadas = sorted(licitaciones_activas, key=obtener_clave_ordenamiento)
+
+        for lic in activas_ordenadas:
+            tags = ['proceso']
+            dias_restantes_str = lic.get_dias_restantes()
+            if "días" in dias_restantes_str:
+                try:
+                    dias = int(dias_restantes_str.split()[1])
+                    if dias <= 7:
+                        tags.append('proximo')
+                except (ValueError, IndexError):
+                    pass
+
+            # --- Lógica de visualización mejorada ---
+            monto_ofertado = lic.get_oferta_total(solo_participados=True)
+            monto_ofertado_str = f"RD$ {monto_ofertado:,.2f}" if monto_ofertado > 0 else "N/D"
+            dif_str = f"{lic.get_diferencia_porcentual(solo_participados=True, usar_base_personal=False):.2f}%" if monto_ofertado > 0 else "N/D"
+            # --- Fin de la lógica ---
+
+            values = (
+                lic.numero_proceso,
+                lic.nombre_proceso,
+                self._display_empresas_de(lic),
+                dias_restantes_str,
+                f"{lic.get_porcentaje_completado():.1f}%",
+                dif_str,
+                monto_ofertado_str,
+                lic.estado
+            )
+            self.tree.insert('', tk.END, values=values, tags=tuple(tags))
+
+        if licitaciones_finalizadas:
+            tv = self.tree  # <— usa SIEMPRE el Treeview real
+
+            parent_id = "finalizadas_parent"
+            tv.insert(
+                '', tk.END, iid=parent_id,
+                values=("", f"▶ Licitaciones Finalizadas ({len(licitaciones_finalizadas)})", "", "", "", "", "", ""),
+                tags=('finalizadas_header',)
+            )
+
+            finalizadas_ordenadas = sorted(licitaciones_finalizadas, key=lambda l: l.nombre_proceso, reverse=True)
+
+            for lic in finalizadas_ordenadas:
+                # 1) Calcula los valores de la fila
+                monto_ofertado = lic.get_oferta_total(solo_participados=True)
+                monto_ofertado_str = f"RD$ {monto_ofertado:,.2f}" if monto_ofertado > 0 else "N/D"
+                dif_str = (
+                    f"{lic.get_diferencia_porcentual(solo_participados=True, usar_base_personal=False):.2f}%"
+                    if monto_ofertado > 0 else "N/D"
+                )
+
+                values = (
+                    lic.numero_proceso,
+                    lic.nombre_proceso,
+                    self._display_empresas_de(lic),
+                    lic.get_dias_restantes(),
+                    f"{lic.get_porcentaje_completado():.1f}%",
+                    dif_str,
+                    monto_ofertado_str,
+                    lic.estado
+                )
+
+                # 2) Construye los tags (color de fila)
+                tags = []
+                estado = getattr(lic, "estado", "Iniciada") or "Iniciada"
+                if estado == "Adjudicada":
+                    hay_lote_nuestro = any(getattr(l, "ganado_por_nosotros", False) for l in getattr(lic, "lotes", []))
+                    tags.append("ganada" if hay_lote_nuestro else "perdida")
+                else:
+                    tags.append("en_proceso")
+
+                # 3) Inserta la fila usando el Treeview correcto
+                tv.insert(parent_id, tk.END, values=values, tags=tuple(tags))
+
+        self._actualizar_contadores_barra_estado()
+
+    def __init__(self, parent, licitacion, db):
+        super().__init__(parent)
+        self.parent_app = parent
+        self.licitacion = licitacion
+        self.db = db
+
+        self.title(f"Seleccionar Ganadores - {licitacion.nombre_proceso}")
+        self.geometry("800x400")
+        self.grab_set()
+
+        main_frame = ttk.Frame(self, padding="10")
+        main_frame.pack(fill=tk.BOTH, expand=True)
+
+        # --- Tabla de lotes ---
+        cols = ("lote", "ganador", "nuestra_empresa")
+        self.tree = ttk.Treeview(main_frame, columns=cols, show="headings", height=10)
+        self.tree.heading("lote", text="Lote")
+        self.tree.heading("ganador", text="Ganador")
+        self.tree.heading("nuestra_empresa", text="Empresa Nuestra (si aplica)")
+        self.tree.column("lote", width=120, anchor=tk.CENTER)
+        self.tree.column("ganador", width=220, anchor=tk.W)
+        self.tree.column("nuestra_empresa", width=250, anchor=tk.W)
+
+        self.tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        scrollbar = ttk.Scrollbar(main_frame, orient="vertical", command=self.tree.yview)
+        self.tree.configure(yscroll=scrollbar.set)
+        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+
+        # --- Poblar tabla ---
+        for lote in self.licitacion.lotes:
+            self.tree.insert("", tk.END, iid=str(lote.numero), 
+                             values=(f"Lote {lote.numero} - {lote.nombre}", "", ""))
+
+        # --- Frame inferior ---
+        bottom_frame = ttk.Frame(self, padding="5")
+        bottom_frame.pack(fill=tk.X)
+
+        ttk.Button(bottom_frame, text="Asignar Ganador", command=self.asignar_ganador).pack(side=tk.LEFT, padx=5)
+        ttk.Button(bottom_frame, text="Cerrar", command=self.destroy).pack(side=tk.RIGHT, padx=5)
+
+    def crear_tabla_historial(self, parent_frame):
+        cols = ('proceso', 'institucion', 'nombre', 'monto', 'resultado')
+        self.tree = ttk.Treeview(parent_frame, columns=cols, show="headings")
+
+        self.tree.heading('proceso', text="Proceso");       self.tree.column('proceso', width=150)
+        self.tree.heading('institucion', text="Institución"); self.tree.column('institucion', width=220)
+        self.tree.heading('nombre', text="Nombre Licitación"); self.tree.column('nombre', width=380)
+        self.tree.heading('monto', text="Monto Ofertado");     self.tree.column('monto', width=160, anchor=tk.E)
+        self.tree.heading('resultado', text="Resultado");      self.tree.column('resultado', width=110, anchor=tk.CENTER)
+
+        self.tree.tag_configure('ganador', background='#d4edda')
+
+        # Doble clic: abrir reporte de licitación
+        self.tree.bind("<Double-1>", self._abrir_reporte_licitacion)
+
+        for item in self.historial:
+            tags = ('ganador',) if item['resultado'] == "🏆 Ganador" else ()
+            self.tree.insert(
+                '', tk.END,
+                values=(item['proceso'], item['institucion'], item['nombre'],
+                        f"RD$ {item['monto_ofertado']:,.2f}", item['resultado']),
+                tags=tags
+            )
+        self.tree.pack(fill=tk.BOTH, expand=True)
+
+    def crear_tabla_historial(self, parent_frame):
+        cols = ('proceso', 'institucion', 'nombre', 'monto', 'resultado')
+        self.tree = ttk.Treeview(parent_frame, columns=cols, show="headings")
+        self.tree.heading('proceso', text="Proceso")
+        self.tree.heading('institucion', text="Institución")
+        self.tree.heading('nombre', text="Nombre Licitación")
+        self.tree.heading('monto', text="Monto Adjudicado")
+        self.tree.heading('resultado', text="Resultado")
+        self.tree.column('proceso', width=150)
+        self.tree.column('institucion', width=220)
+        self.tree.column('nombre', width=380)
+        self.tree.column('monto', width=160, anchor=tk.E)
+        self.tree.column('resultado', width=110, anchor=tk.CENTER)
+        self.tree.tag_configure('ganador', background='#d4edda')
+        self.tree.bind("<Double-1>", self._abrir_detalles_licitacion)
+
+        for item in self.historial:
+            tags = ('ganador',) if item['resultado'].startswith("🏆") else ()
+            self.tree.insert('', tk.END,
+                values=(item['proceso'], item['institucion'], item['nombre'],
+                        f"RD$ {item['monto_adjudicado']:,.2f}", item['resultado']),
+                tags=tags)
+        self.tree.pack(fill=tk.BOTH, expand=True)
+
+
+
+    def _crear_tabla_pivote(self, parent_frame):
+        matriz_ofertas = self.licitacion.get_matriz_ofertas()
+        if not matriz_ofertas:
+            ttk.Label(parent_frame, text="No hay ofertas habilitadas para analizar.").pack(pady=20)
+            return
+
+        # Obtener la lista de todos los competidores que han ofertado
+        todos_los_oferentes = sorted(list(set(
+            oferente for ofertas_lote in matriz_ofertas.values() for oferente in ofertas_lote
+        )))
+
+        # Configurar las columnas del Treeview
+        columnas = ['lote'] + todos_los_oferentes
+        tree = ttk.Treeview(parent_frame, columns=columnas, show="headings")
+        
+        tree.heading('lote', text='Lote')
+        tree.column('lote', width=250)
+        for oferente in todos_los_oferentes:
+            tree.heading(oferente, text=oferente)
+            tree.column(oferente, width=120, anchor=tk.E)
+
+        # Configurar el tag para resaltar las ofertas mínimas
+        tree.tag_configure('oferta_minima', background='#d4edda', font=('Helvetica', 9, 'bold'))
+
+        # Llenar la tabla con los datos de la matriz
+        for lote_num, ofertas in sorted(matriz_ofertas.items()):
+            # Encontrar el monto mínimo para este lote
+            monto_minimo = min((d['monto'] for d in ofertas.values()), default=float('inf'))
+
+            lote_obj = next((l for l in self.licitacion.lotes if str(l.numero) == lote_num), None)
+            nombre_lote = lote_obj.nombre if lote_obj else 'N/D'
+            
+            valores_fila = [f"Lote {lote_num}: {nombre_lote}"]
+            for oferente in todos_los_oferentes:
+                oferta = ofertas.get(oferente)
+                if oferta:
+                    valores_fila.append(f"RD$ {oferta['monto']:,.2f}")
+                else:
+                    valores_fila.append("---") # Si un oferente no participa en un lote
+
+            item_id = tree.insert("", tk.END, values=valores_fila)
+            
+            # Aplicar el resaltado a la celda con el monto mínimo
+            for i, oferente in enumerate(todos_los_oferentes):
+                if ofertas.get(oferente) and ofertas[oferente]['monto'] == monto_minimo:
+                    # El Treeview no permite colorear celdas individuales, así que se aplica a toda la fila
+                    # pero el texto en negrita da la pista visual. Es una limitación de ttk.Treeview.
+                    tree.item(item_id, tags=('oferta_minima',))
+
+class VentanaComparadorOfertas(tk.Toplevel):
+    """Muestra una tabla comparativa de ofertas para un lote específico."""
+    def __init__(self, parent, licitacion, num_lote):
+        super().__init__(parent)
+        self.parent = parent
+        self.licitacion = licitacion
+        # 🔴 CLAVE: guardar el parámetro en self para usarlo en toda la clase
+        self.num_lote = str(num_lote)
+
+        self.title(f"Comparador de Ofertas – Lote {self.num_lote}")
+        self.geometry("800x500")
+        try:
+            self.grab_set()
+        except Exception:
+            pass
+
+        main = ttk.Frame(self, padding=10)
+        main.pack(fill=tk.BOTH, expand=True)
+
+        # Tabla
+        self.tree = ttk.Treeview(
+            main,
+            columns=("participante", "tipo", "monto", "pct", "ganador"),
+            show="headings",
+            height=14
+        )
+        self.tree.heading("participante", text="Participante")
+        self.tree.heading("tipo", text="Tipo")
+        self.tree.heading("monto", text="Monto Ofertado")
+        self.tree.heading("pct", text="% vs Base")
+        self.tree.heading("ganador", text="Ganador")
+
+        self.tree.column("participante", width=260, anchor=tk.W)
+        self.tree.column("tipo", width=100, anchor=tk.CENTER)
+        self.tree.column("monto", width=140, anchor=tk.E)
+        self.tree.column("pct", width=100, anchor=tk.E)
+        self.tree.column("ganador", width=80, anchor=tk.CENTER)
+        self.tree.pack(fill=tk.BOTH, expand=True)
+
+        # Resaltado para ganador
+        self.tree.tag_configure("ganador", background="#d4edda", font=("Helvetica", 9, "bold"))
+
+        # Cargar datos desde el método que ya agregamos antes
+        ofertas = self._recopilar_ofertas()  # ← EXISTE por el bloque que pegaste en el paso anterior
+
+        for o in ofertas:
+            pct = o.get('pct_vs_base', None)
+            pct_txt = f"{pct:.2f}%" if isinstance(pct, (int, float)) else "N/D"
+            tags = ("ganador",) if o.get('ganador') else ()
+            self.tree.insert(
+                "",
+                tk.END,
+                values=(
+                    o.get('participante', ''),
+                    o.get('tipo', ''),
+                    f"RD$ {float(o.get('monto', 0) or 0):,.2f}",
+                    pct_txt,
+                    "Sí" if o.get('ganador') else "No"
+                ),
+                tags=tags
+            )
+
+    def _crear_tabla_comparativa(self, parent, ofertas):
+        if not ofertas:
+            ttk.Label(parent, text="No hay ofertas habilitadas para comparar en este lote.").pack()
+            return
+
+        oferentes = list(ofertas.keys())
+        criterios = ["Monto Ofertado", "Plazo (días)", "Garantía (meses)"]
+
+        tree = ttk.Treeview(parent, columns=['criterio'] + oferentes, show="headings")
+        tree.heading('criterio', text='Criterio')
+        tree.column('criterio', width=150, anchor=tk.W)
+        for oferente in oferentes:
+            tree.heading(oferente, text=oferente)
+            tree.column(oferente, width=150, anchor=tk.E)
+
+        # Encontrar los mejores valores para resaltar
+        valores_monto = [d['monto'] for d in ofertas.values() if d['monto'] > 0]
+        valores_plazo = [d['plazo'] for d in ofertas.values() if d['plazo'] > 0]
+        valores_garantia = [d['garantia'] for d in ofertas.values() if d['garantia'] > 0]
+
+        mejor_monto = min(valores_monto) if valores_monto else None
+        mejor_plazo = min(valores_plazo) if valores_plazo else None
+        mejor_garantia = max(valores_garantia) if valores_garantia else None
+
+        # Poblar filas
+        # Fila de Monto
+        row_monto = [criterios[0]]
+        for oferente in oferentes:
+            monto = ofertas[oferente]['monto']
+            display = f"RD$ {monto:,.2f}"
+            if monto == mejor_monto: display += " ⭐" # Mejor oferta
+            row_monto.append(display)
+        tree.insert("", tk.END, values=row_monto)
+
+        # Fila de Plazo
+        row_plazo = [criterios[1]]
+        for oferente in oferentes:
+            plazo = ofertas[oferente]['plazo']
+            display = f"{plazo} días"
+            if plazo == mejor_plazo: display += " ⭐"
+            row_plazo.append(display)
+        tree.insert("", tk.END, values=row_plazo)
+
+        # Fila de Garantía
+        row_garantia = [criterios[2]]
+        for oferente in oferentes:
+            garantia = ofertas[oferente]['garantia']
+            display = f"{garantia} meses"
+            if garantia == mejor_garantia: display += " ⭐"
+            row_garantia.append(display)
+        tree.insert("", tk.END, values=row_garantia)
+
+        tree.pack(fill=tk.BOTH, expand=True)
+
+    def crear_seccion_cronograma(self, parent):
+        frame = ttk.LabelFrame(parent, text="Cronograma", padding=10); frame.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(0, 10))
+        tree = ttk.Treeview(frame, columns=("evento", "fecha", "estado"), show="headings", height=7)
+        tree.heading("evento", text="Hito"); tree.heading("fecha", text="Fecha Límite"); tree.heading("estado", text="Estado")
+        tree.column("evento", width=250); tree.column("fecha", anchor=tk.CENTER); tree.column("estado", anchor=tk.CENTER)
+        tree.tag_configure('cumplido', background='#d4edda'); tree.tag_configure('incumplido', background='#f8d7da')
+        for evento, datos in sorted(self.licitacion.cronograma.items()):
+            tree.insert("", tk.END, values=(evento, datos.get("fecha_limite", "N/D"), datos.get("estado", "Pendiente")), tags=(datos.get("estado", "Pendiente").lower(),))
+        tree.pack(fill=tk.BOTH, expand=True)
+
+    def _actualizar_vista_participantes(self, event=None):
+        for widget in self.participants_frame.winfo_children():
+            widget.destroy()
+
+        tree = ttk.Treeview(
+            self.participants_frame,
+            columns=("participante", "monto_ofertado", "monto_habilitado", "fase_a_general", "monto_base_lote", "dif_lote"),
+            show="headings"
+        )
+
+        tree.heading("participante", text="Participante / Lote Ofertado")
+        tree.heading("monto_ofertado", text="Monto Ofertado")
+        tree.heading("monto_habilitado", text="Monto Habilitado (Fase A)")
+        tree.heading("fase_a_general", text="Estado Fase A")
+        tree.heading("monto_base_lote", text="Monto Base Lote")
+        tree.heading("dif_lote", text="% Diferencia")
+
+        tree.column("participante", width=350, anchor=tk.W)
+        tree.column("monto_ofertado", width=130, anchor=tk.E)
+        tree.column("monto_habilitado", width=150, anchor=tk.E)
+        tree.column("fase_a_general", width=100, anchor=tk.CENTER)
+        tree.column("monto_base_lote", width=130, anchor=tk.E)
+        tree.column("dif_lote", width=80, anchor=tk.CENTER)
+
+        tree.tag_configure('competidor', font=('Helvetica', 10, 'bold'))
+        tree.tag_configure('oferta_baja', background='#d4edda')
+        tree.tag_configure('nuestra_empresa', background='#cce5ff')
+        tree.tag_configure('descalificado', foreground='red')
+        tree.tag_configure('pendiente', foreground='orange')
+
+        # --- INICIO DE LA LÓGICA CORREGIDA ---
+        # Un proceso se considera evaluado en Fase A si el hito está cumplido
+        # O si la licitación ya está en un estado final (como Adjudicada).
+        hito_eval = self.licitacion.cronograma.get("Informe de Evaluacion Tecnica", {})
+        estado_hito_cumplido = hito_eval.get("estado") == "Cumplido"
+        
+        # Estados que implican que la Fase A ya fue superada y evaluada
+        estados_que_implican_fase_A_evaluada = {
+            "Adjudicada", 
+            "Descalificado Fase B", 
+            "Sobre B Entregado"
+        }
+        
+        fase_A_evaluada = estado_hito_cumplido or (self.licitacion.estado in estados_que_implican_fase_A_evaluada)
+        # --- FIN DE LA LÓGICA CORREGIDA ---
+
+        participantes = [o.__dict__ for o in getattr(self.licitacion, "oferentes_participantes", [])]
+
+        nuestras = ", ".join(str(e) for e in getattr(self.licitacion, "empresas_nuestras", [])) or "Nuestras Empresas"
+        nuestras_ofertas = [
+            {'lote_numero': l.numero, 'monto': l.monto_ofertado, 'paso_fase_A': l.fase_A_superada}
+            for l in getattr(self.licitacion, "lotes", [])
+            if l.participamos
+        ]
+        participantes.append({"nombre": f"➡️ {nuestras} (Nuestra Oferta)", "es_nuestra": True, "ofertas_por_lote": nuestras_ofertas})
+
+        for p in participantes:
+            if fase_A_evaluada:
+                p["monto_habilitado"] = sum(o['monto'] for o in p["ofertas_por_lote"] if o.get('paso_fase_A', True))
+            else:
+                p["monto_habilitado"] = 0
+
+        min_monto = min((p["monto_habilitado"] for p in participantes if p["monto_habilitado"] > 0), default=float('inf'))
+
+        for p in sorted(participantes, key=lambda item: item["monto_habilitado"] if item["monto_habilitado"] > 0 else float('inf')):
+            tags = ['competidor']
+            if p.get("es_nuestra"):
+                tags.append('nuestra_empresa')
+
+            if fase_A_evaluada:
+                # Si un oferente no tiene ofertas, se asume que no pasó la Fase A.
+                habilitado = any(o.get('paso_fase_A', False) for o in p.get('ofertas_por_lote', [])) if p.get('ofertas_por_lote') else False
+                estado_general = "Habilitado" if habilitado else "Descalificado"
+                if not habilitado:
+                    tags.append('descalificado')
+                    
+                monto_habilitado_str = f"RD$ {p['monto_habilitado']:,.2f}"
+                if habilitado and p["monto_habilitado"] > 0 and p["monto_habilitado"] == min_monto:
+                    tags.append('oferta_baja')
+            else:
+                estado_general = "Pendiente"
+                monto_habilitado_str = "N/D"
+                tags.append('pendiente')
+
+            parent_id = tree.insert(
+                "", tk.END,
+                values=(p['nombre'], f"RD$ {sum(o.get('monto', 0) for o in p.get('ofertas_por_lote', [])):,.2f}", monto_habilitado_str, estado_general, "", ""),
+                tags=tuple(tags)
+            )
+
+            for oferta in sorted(p.get('ofertas_por_lote', []), key=lambda o: o.get('lote_numero', '')):
+                lote_obj = next((l for l in getattr(self.licitacion, "lotes", []) if str(l.numero) == str(oferta.get('lote_numero'))), None)
+                lote_nombre = getattr(lote_obj, "nombre", "N/E")
+                monto_base_str, dif_pct_str = "N/D", "N/D"
+
+                if lote_obj:
+                    monto_base = getattr(lote_obj, "monto_base", 0) or 0
+                    monto_ofertado = oferta.get('monto', 0) or 0
+                    monto_base_str = f"RD$ {monto_base:,.2f}"
+                    if monto_base > 0 and monto_ofertado > 0:
+                        dif_pct = ((monto_ofertado - monto_base) / monto_base) * 100
+                        dif_pct_str = f"{dif_pct:.2f}%"
+
+                if fase_A_evaluada:
+                    paso_fase_a = oferta.get('paso_fase_A', True) if p.get('es_nuestra') else oferta.get('paso_fase_A', False)
+                    estado_fase_a_lote = "✅" if paso_fase_a else "❌"
+                    lote_tags = () if paso_fase_a else ('descalificado',)
+                else:
+                    estado_fase_a_lote = "⏳"; lote_tags = ('pendiente',)
+
+                tree.insert(
+                    parent_id, tk.END,
+                    values=(f"    ↳ Lote {oferta.get('lote_numero', '')}: {lote_nombre}",
+                            f"RD$ {oferta.get('monto', 0):,.2f}", "", estado_fase_a_lote, monto_base_str, dif_pct_str),
+                    tags=lote_tags
+                )
+
+        tree.pack(fill=tk.BOTH, expand=True)
+
+    def cargar_listas(self):
+        for entity_type, widgets in [("empresa", self.widgets_empresas), ("institucion", self.widgets_instituciones)]:
+            tree, entity_list = widgets["tree"], self.entidades_copia[entity_type]
+            tree.delete(*tree.get_children())
+            
+            # --- LÓGICA ANTI-DUPLICADOS ---
+            nombres_vistos = set()
+            entidades_unicas = []
+            for e in entity_list:
+                nombre = e.get('nombre', '').strip()
+                if nombre and nombre.lower() not in nombres_vistos:
+                    nombres_vistos.add(nombre.lower())
+                    entidades_unicas.append(e)
+            # --- FIN DE LA LÓGICA ---
+
+            # Usar la lista ya filtrada y ordenada
+            for e in sorted(entidades_unicas, key=lambda x: x.get('nombre', '')):
+                values = (e.get('nombre', ''), e.get('rnc', ''), e.get('telefono', ''), e.get('correo', ''))
+                if e.get('nombre'):
+                    tree.insert("", tk.END, values=values, iid=e['nombre'])
+            widgets["status_var"].set(f"Total: {len(entidades_unicas)} {entity_type}s")
+
+
+
+
+
+
+
